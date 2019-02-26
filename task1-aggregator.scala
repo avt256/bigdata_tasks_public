@@ -21,6 +21,7 @@ val sqlContext = SparkSession.active.sqlContext
 import sqlContext.implicits._
 val filepath = sqlContext.getConf("spark.driver.args")
 val df = sqlContext.read.option("header","true").csv(filepath)
+
 case class Event(userId: String, category: String, product: String, eventType: String, eventTime: Timestamp)
 case class Session(userId: String, category: String, product: String, eventType: String, sessionStart: Timestamp, sessionEnd: Timestamp)
 
@@ -28,10 +29,11 @@ case class Session(userId: String, category: String, product: String, eventType:
 
 val sessionsAggregator = new Aggregator[Event, ArrayBuffer[Event], ArrayBuffer[(Event, String, Timestamp, Timestamp)]] with Serializable {
   def zero: ArrayBuffer[Event] = ArrayBuffer.empty
-  def reduce(b: ArrayBuffer[Event], event: Event) = {
-    b += event
+  def reduce(buffer: ArrayBuffer[Event], event: Event) = {
+    buffer += event
   }
-  def merge(b1: ArrayBuffer[Event], b2: ArrayBuffer[Event]) = { b1 ++= b2; b1}
+  def merge(buf1: ArrayBuffer[Event], buf2: ArrayBuffer[Event]) = { buf1 ++= buf2; buf1}
+
   def finish(events: ArrayBuffer[Event]): ArrayBuffer[(Event, String, Timestamp, Timestamp)] = {
     val sesBuf: ArrayBuffer[(Timestamp, Timestamp)] = ArrayBuffer.empty
     var prevTimeOpt: Option[Timestamp] = None
