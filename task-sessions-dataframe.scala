@@ -38,13 +38,14 @@ val SessionInterval = 300
 val windowSpec = Window.partitionBy($"userId", $"category").orderBy($"eventTime")
 
 // finds all sessions for events with interval > 5 min, also split session by product change is flag is set
+
 def makeSessionsDf(isBreakByProduct: Boolean) =
   initDf
     .withColumn("prevEventTime", lag($"eventTime", 1) over windowSpec)
     .withColumn("nextEventTime", lag($"eventTime", -1) over windowSpec)
     .withColumn("nextProduct", lag($"product", -1) over windowSpec)
-    .withColumn("prevDiff", $"eventTime".cast(IntegerType) - $"prevEventTime".cast(IntegerType))
-    .withColumn("nextDiff", $"nextEventTime".cast(IntegerType) - $"eventTime".cast(IntegerType))
+    .withColumn("prevDiff", $"eventTime".cast(LongType) - $"prevEventTime".cast(LongType))
+    .withColumn("nextDiff", $"nextEventTime".cast(LongType) - $"eventTime".cast(LongType))
     .filter($"prevDiff" > SessionInterval || ($"nextProduct" =!= $"product" && isBreakByProduct) || $"prevDiff".isNull || $"nextDiff" > SessionInterval || $"nextDiff".isNull)
     .withColumn("sessionStartTime", lag($"eventTime", 1) over windowSpec)
     .filter($"nextDiff" > SessionInterval || $"nextDiff".isNull || ($"nextProduct" =!= $"product" && isBreakByProduct))
@@ -121,8 +122,9 @@ println("top ranked products by session duration")
 val windowSpec2 = Window.partitionBy($"category").orderBy($"sessDuration".desc)
 val durationsRanks =
   durationsByProductDf
-    .drop("eventType", "sessionEndTime", "sessionStartTime", "sessionId").withColumn("rank", rank() over windowSpec2)
-      .filter($"rank" <= 10)
+    .drop("eventType", "sessionEndTime", "sessionStartTime", "sessionId")
+    .withColumn("rank", rank() over windowSpec2)
+    .filter($"rank" <= 10)
 durationsRanks.show(100)
 
 
