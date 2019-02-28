@@ -49,11 +49,11 @@ def makeEventsEnrichedWithSessionsDf(isBreakByProduct: Boolean) = {
     .withColumn("sessionId", monotonically_increasing_id())
     .withColumn("sessionStartTime",
       when($"prevDiff" > SessionInterval || $"prevDiff".isNull || ($"prevProduct" =!= $"product" && isBreakByProduct), $"eventTime")
-        .otherwise(lit(null)))
+        .otherwise(null))
     .withColumn("sessionEndTime",
       when($"nextDiff" > SessionInterval || $"nextDiff".isNull || ($"nextProduct" =!= $"product" && isBreakByProduct), $"eventTime")
-        .otherwise(lit(null)))
-    .withColumn("sessionId", when($"sessionStartTime".isNull, lit(null)).otherwise($"sessionId"))
+        .otherwise(null))
+    .withColumn("sessionId", when($"sessionStartTime".isNull, null).otherwise($"sessionId"))
     .withColumn("sessionStartTime", max($"sessionStartTime") over windowSpecBefore)
     .withColumn("sessionEndTime", min($"sessionEndTime") over windowSpecAfter)
     .withColumn("sessionId", max("sessionId") over windowSpecBefore)
@@ -69,6 +69,7 @@ def makeDistinctSessions(events: DataFrame) =
     .distinct()
 
 val sessionsDf = makeDistinctSessions(eventWithSessions)
+sessionsDf.cache()
 
 println("found sessions")
 sessionsDf.show(100)
@@ -80,20 +81,18 @@ val durationsDf =
     .withColumn("sessDuration", $"sessionEndTime".cast(LongType) - $"sessionStartTime".cast(LongType))
       .drop("sessionStartTime", "sessionEndTime")
 
+println("sessions durations")
+durationsDf.show(100)
+
 println("median session duration per category")
 
-val mediansDf =
-  durationsDf
-    .select($"category".as[String], $"sessDuration".as[Long])
-    .groupByKey(_._1)
-    .mapGroups { case (key, durations) =>
-        val seq = durations.map(_._2).toArray
-        val sorted = seq.sorted
-        key -> sorted((seq.length + 1) / 2)
-    }.toDF("category", "median session duration")
+val medians = {
+  durationsDf.createOrReplaceTempView("durations")
+  sqlContext
+    .sql("SELECT category, percentile(sessDuration, 0.5) FROM durations GROUP BY category")
+}
 
-
-mediansDf.show(100)
+medians.show(100)
 
 println("calc num unique users per category and duration type")
 
@@ -103,7 +102,9 @@ val durationsTypes =
     when($"sessDuration" > 300, "long")
       .when($"sessDuration" > 60, "middle")
       .otherwise("short"))
-  .select($"category", $"durationType", $"userId").groupBy($"category", $"durationType").agg(countDistinct($"userId"))
+  .select($"category", $"durationType", $"userId")
+    .groupBy($"category", $"durationType")
+    .agg(countDistinct($"userId"))
 
 durationsTypes.show(100)
 
@@ -121,8 +122,8 @@ val windowSpec2 = Window.partitionBy($"category").orderBy($"sessDuration".desc)
 val durationsRanks =
   durationsByProductDf
     .drop("eventType", "sessionEndTime", "sessionStartTime", "sessionId")
-    .withColumn("rank", rank() over windowSpec2)
-    .filter($"rank" <= 10)
+    .withColumn("row_num", row_number() over windowSpec2)
+    .filter($"row_num" <= 10)
 durationsRanks.show(100)
 
 
