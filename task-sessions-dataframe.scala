@@ -7,7 +7,7 @@
   *
   */
 
-import org.apache.spark.sql.{Dataset, Encoders, SaveMode, SparkSession}
+import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.types._
@@ -30,50 +30,48 @@ val filepath = sqlContext.getConf("spark.driver.args")
 val initDf = sqlContext.read.option("header","true").schema(customSchema).csv(filepath)
 
 // calc and show sessions using lag window function
-
-println("initial events")
-initDf.show(100)
-
-val SessionInterval = 300
-val windowSpec = Window.partitionBy($"userId", $"category").orderBy($"eventTime")
-
 // finds all sessions for events with interval > 5 min, also split session by product change is flag is set
 
-def makeSessionsDf(isBreakByProduct: Boolean) =
+def makeEventsEnrichedWithSessionsDf(isBreakByProduct: Boolean) = {
+  val SessionInterval = 300
+  val sessionGroupColumns = Seq($"userId", $"category")
+  val windowSpecAround = Window.partitionBy(sessionGroupColumns: _*).orderBy($"eventTime")
+  val windowSpecBefore = Window.partitionBy(sessionGroupColumns: _*).orderBy($"eventTime").rowsBetween(Long.MinValue, 0)
+  val windowSpecAfter = Window.partitionBy(sessionGroupColumns: _*).orderBy($"eventTime").rowsBetween(0, Long.MaxValue)
+
   initDf
-    .withColumn("prevEventTime", lag($"eventTime", 1) over windowSpec)
-    .withColumn("nextEventTime", lag($"eventTime", -1) over windowSpec)
-    .withColumn("nextProduct", lag($"product", -1) over windowSpec)
+    .withColumn("prevEventTime", lag($"eventTime", 1) over windowSpecAround)
+    .withColumn("nextEventTime", lead($"eventTime", 1) over windowSpecAround)
+    .withColumn("nextProduct", lead($"product", 1) over windowSpecAround)
+    .withColumn("prevProduct", lag($"product", 1) over windowSpecAround)
     .withColumn("prevDiff", $"eventTime".cast(LongType) - $"prevEventTime".cast(LongType))
     .withColumn("nextDiff", $"nextEventTime".cast(LongType) - $"eventTime".cast(LongType))
-    .filter($"prevDiff" > SessionInterval || ($"nextProduct" =!= $"product" && isBreakByProduct) || $"prevDiff".isNull || $"nextDiff" > SessionInterval || $"nextDiff".isNull)
-    .withColumn("sessionStartTime", lag($"eventTime", 1) over windowSpec)
-    .filter($"nextDiff" > SessionInterval || $"nextDiff".isNull || ($"nextProduct" =!= $"product" && isBreakByProduct))
-    .withColumn("sessionStartTime", when($"prevDiff" > SessionInterval, $"eventTime").otherwise($"sessionStartTime"))
-    .withColumn("sessionStartTime", when($"sessionStartTime".isNull, $"eventTime").otherwise($"sessionStartTime"))
     .withColumn("sessionId", monotonically_increasing_id())
-    .withColumnRenamed("eventTime", "sessionEndTime")
-    .select("category", "product", "userId", "sessionStartTime", "sessionEndTime", "sessionId")
+    .withColumn("sessionStartTime",
+      when($"prevDiff" > SessionInterval || $"prevDiff".isNull || ($"prevProduct" =!= $"product" && isBreakByProduct), $"eventTime")
+        .otherwise(lit(null)))
+    .withColumn("sessionEndTime",
+      when($"nextDiff" > SessionInterval || $"nextDiff".isNull || ($"nextProduct" =!= $"product" && isBreakByProduct), $"eventTime")
+        .otherwise(lit(null)))
+    .withColumn("sessionId", when($"sessionStartTime".isNull, lit(null)).otherwise($"sessionId"))
+    .withColumn("sessionStartTime", max($"sessionStartTime") over windowSpecBefore)
+    .withColumn("sessionEndTime", min($"sessionEndTime") over windowSpecAfter)
+    .withColumn("sessionId", max("sessionId") over windowSpecBefore)
+    .select("category", "product", "userId", "eventTime", "sessionId", "sessionStartTime", "sessionEndTime")
+}
 
-val sessionsDf = makeSessionsDf(isBreakByProduct = false)
+val eventWithSessions = makeEventsEnrichedWithSessionsDf(isBreakByProduct = false)
+println("events with sessions")
+eventWithSessions.show(100)
+
+def makeDistinctSessions(events: DataFrame) =
+  events.select("category", "userId", "sessionId", "sessionStartTime", "sessionEndTime")
+    .distinct()
+
+val sessionsDf = makeDistinctSessions(eventWithSessions)
+
 println("found sessions")
 sessionsDf.show(100)
-
-// joins initial events with found sessions
-
-println("initial event enriched with sessions")
-
-val enrichedWithSessionsDf =
-  initDf.join(sessionsDf,
-    initDf("userId") === sessionsDf("userId") &&
-    initDf("category") === sessionsDf("category") &&
-    initDf("eventTime") <= sessionsDf("sessionEndTime") &&
-    initDf("eventTime") >= sessionsDf("sessionStartTime"))
-
-enrichedWithSessionsDf
-  .select(initDf("*"), sessionsDf("sessionId"), sessionsDf("sessionStartTime"), sessionsDf("sessionEndTime"))
-  .show(100)
-
 
 // sessions with durations
 
@@ -111,7 +109,7 @@ durationsTypes.show(100)
 
 
 val durationsByProductDf =
-  makeSessionsDf(isBreakByProduct = true)
+  makeDistinctSessions(makeEventsEnrichedWithSessionsDf(isBreakByProduct = true))
     .withColumn("sessDuration", $"sessionEndTime".cast(LongType) - $"sessionStartTime".cast(LongType))
 
 println("sessions split by product change")
